@@ -1,0 +1,351 @@
+#!/bin/bash
+
+source ./config.sh
+
+log_error() {
+    echo "$(date) - ERROR: $1" >> "$LOG_BOT_FILE"
+}
+
+log_warn() {
+    echo "$(date) - WARN: $1" >> "$LOG_BOT_FILE"
+}
+
+log_info() {
+    echo "$(date) - INFO: $1" >> "$LOG_BOT_FILE"
+}
+
+TELEGRAM_URL="https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage"
+
+SUDO_CMD=""
+if [ "${USE_SUDO}" = "true" ]; then
+    SUDO_CMD="sudo"
+fi
+
+send_message() {
+    local message=$1
+    res=$(curl -s -X POST $TELEGRAM_URL -d chat_id=$CHAT_ID -d text="$message")
+
+    if [[ $(echo "$res" | jq -r '.ok') != "true" ]]; then
+        log_error "Ошибка отправки сообщения: $message"
+        return 1
+    fi
+}
+
+generate_keyboard() {
+    local action_text="$1"
+    shift
+    buttons=""
+
+    for button_text in "$@"; do
+        buttons="$buttons, [{\"text\":\"$button_text\"}]"
+    done
+
+    keyboard="{\"keyboard\": [${buttons:2}], \"one_time_keyboard\": true}"
+
+    res=$(curl -s -X POST $TELEGRAM_URL -d chat_id=$CHAT_ID -d text="$action_text" -d reply_markup="$keyboard")
+
+    if [[ $(echo "$res" | jq -r '.ok') != "true" ]]; then
+        log_error "Ошибка генерации клавиатуры: $keyboard"
+    fi
+}
+
+set_bot_commands() {
+    res=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/setMyCommands" -H "Content-Type: application/json" -d '{
+        "commands": [
+            {"command": "update", "description": "Обновить ноду"},
+            {"command": "history_update", "description": "Получить историю обновления"},
+            {"command": "service", "description": "Сервис"},
+            {"command": "catchup", "description": "Проверить синхронизацию"},
+            {"command": "validators", "description": "Проверить валидаторов"},
+            {"command": "get_log_bot", "description": "Получить логи бота"},
+            {"command": "log_service", "description": "Просмотр логов сервиса"}
+        ]
+    }')
+
+    if [[ $(echo "$res" | jq -r '.ok') != "true" ]]; then
+        log_error "Ошибка создания меню"
+        return 1
+    fi
+}
+
+send_main_menu() {
+    local message+="<b>/update</b> - обновление ноды%0A%0A"
+    message+="<b>/history_update</b> - скачать историю обновлений%0A%0A"
+    message+="<b>/service</b> - Рестарт/Старт/Стоп%0A%0A"
+    message+="<b>/catchup</b> - проверка синхронизации%0A%0A"
+    message+="<b>/validators</b> - получить список валидаторов%0A%0A"
+    message+="<b>/log_service</b> - просмотр логов сервиса%0A%0A"
+    message+="<b>/get_log_bot</b> - скачать логи бота%0A%0A"
+
+    res=$(curl -s -X POST "$TELEGRAM_URL" \
+        -d chat_id="$CHAT_ID" \
+        -d text="$message" \
+        -d parse_mode="HTML")
+
+    if [[ $(echo "$res" | jq -r '.ok') != "true" ]]; then
+        log_error "Ошибка создания меню"
+        return 1
+    fi
+
+    res=$(curl -s -X POST "$TELEGRAM_URL" \
+        -d chat_id="$CHAT_ID" \
+        -d text="Выберите одну из команд" \
+        -d reply_markup='{"remove_keyboard": true}')
+
+    if [[ $(echo "$res" | jq -r '.ok') != "true" ]]; then
+        log_error "Ошибка обнуления клавиатуры"
+        return 1
+    fi
+}
+
+send_version_menu() {
+    mapfile -t versions < <(get_versions)
+    generate_keyboard "Выберите версию для обновления:" "${versions[@]}"
+}
+
+send_file() {
+    local file_path="$1"
+
+    if [[ ! -f "$file_path" ]]; then
+        send_message "Файл '$file_path' не найден!"
+        return 1
+    fi
+
+    res=$(curl -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument" \
+        -F "chat_id=${CHAT_ID}" \
+        -F "document=@${file_path}")
+
+    if [[ $(echo "$res" | jq -r '.ok') != "true" ]]; then
+        log_error "Ошибка при отправке файла: ${file_path}."
+        return 1
+    fi
+}
+
+get_updates() {
+    local offset=$1
+    curl -s -X GET "https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${offset}"
+}
+
+get_versions() {
+    repo=""
+    if [[ $CLIENT == $CLIENT_FIREDANCER ]]; then
+        repo="firedancer-io/firedancer"
+    elif [[ $CLIENT == $CLIENT_AGAVE ]]; then
+        repo="anza-xyz/agave"
+    else
+        log_error "Задан неправильный клиент"
+        return 1
+    fi
+    api_url="https://api.github.com/repos/$repo/tags"
+
+    curl -s -H "Authorization: token $GITHUB_TOKEN" "$api_url" | jq -r '.[0:5] | .[] | .name' | sed 's/^v//'
+}
+
+#States
+STATE_MAIN_MENU="main_menu"
+
+STATE_SERVICE="service"
+STATE_SERVICE_2="service_2"
+
+STATE_UPDATE="update"
+STATE_UPDATE_2="update_2"
+
+STATE_LOG="log"
+STATE_LOG_2="log_2"
+
+CURRENT_STATE=$STATE_MAIN_MENU
+
+update() {
+    local command="$1"
+    case "$command" in
+        "/start")
+            send_message "Привет! Я бот, который умеет обновлять ноды Solana"
+            send_main_menu
+            ;;
+
+        "/update")
+            CURRENT_STATE=$STATE_UPDATE
+            send_version_menu
+            ;;
+
+        "/service")
+            CURRENT_STATE=$STATE_SERVICE
+            generate_keyboard "Выберите действие" "start" "stop" "restart"
+            ;;
+
+        "/history_update")
+            send_file "$UPDATE_HISTORY_FILE"
+            ;;
+
+        "/get_log_bot")
+            send_file "$LOG_BOT_FILE"
+            ;;
+
+        "/catchup")
+            catchup
+            ;;
+
+        "/validators")
+            validators
+            ;;
+
+        "/log_service")
+            CURRENT_STATE=$STATE_LOG
+            generate_keyboard "Выберите лог левел" "ERR" "WARNING" "INFO"
+            ;;
+
+        *)
+            case "$CURRENT_STATE" in
+                "$STATE_UPDATE" | "$STATE_UPDATE_2")
+                    handle_update "$command"
+                    ;;
+
+                "$STATE_LOG" | "$STATE_LOG_2")
+                    handle_log "$command"
+                    ;;
+
+                "$STATE_SERVICE" | "$STATE_SERVICE_2")
+                    handle_service "$command"
+                    ;;
+                *)
+                    send_message "Неизвестная команда: $command"
+                    ;;
+            esac
+            ;;
+
+    esac
+}
+
+validators() {
+    output=$(${SUDO_CMD} solana validators | awk '/Stake By Version:/,0' 2>&1)
+    if [[ $? -eq 0 ]]; then
+        echo "$output" | while IFS= read -r line; do send_message "$line"; done
+    else
+        send_message "Ошибка: $output"
+    fi
+}
+
+catchup() {
+    output=$(${SUDO_CMD} solana catchup ${KEY_PAIR_PATH} http://127.0.0.1:8899/ 2>&1)
+    if [[ $? -eq 0 ]]; then
+        send_message "$output"
+        if [[ $output =~ us:([0-9]+) ]]; then us_slot=${BASH_REMATCH[1]}; fi
+        if [[ $output =~ them:([0-9]+) ]]; then them_slot=${BASH_REMATCH[1]}; fi
+        send_message "Разница между слотами: $((us_slot - them_slot))"
+    else
+        send_message "Ошибка: $output"
+    fi
+}
+
+declare -g current_service_action=""
+handle_service() {
+    local command=$1
+
+    case "${CURRENT_STATE}" in
+        "$STATE_SERVICE")
+                CURRENT_STATE=$STATE_SERVICE_2
+                current_service_action=$command
+                generate_keyboard "Вы уверены?" "Yes" "No"
+            ;;
+
+        "$STATE_SERVICE_2")
+            if [[ "$command" == "Yes" ]]; then
+                ${SUDO_CMD} systemctl ${current_service_action} ${SERVICE}
+                send_main_menu
+            else
+                send_main_menu
+            fi
+            ;;
+    esac
+}
+
+declare -g current_version=""
+handle_update() {
+    local command=$1
+
+    case "${CURRENT_STATE}" in
+        "$STATE_UPDATE")
+            if [[ $command =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+                CURRENT_STATE=$STATE_UPDATE_2
+                current_version=$command
+                generate_keyboard "Выберите max-delinquent-stake" "5" "10" "15" "20" "25"
+            else
+                send_message "Неправильно задана версия"
+                send_version_menu
+            fi
+            ;;
+
+        "$STATE_UPDATE_2")
+            if [[ "$command" =~ ^[0-9]+$ ]] && ((command >= 0 && command <= 100)); then
+                update_version "$current_version" "$command"
+            else
+                send_message "max-delinquent-stake может быть в диапазоне от 0 до 100"
+                generate_keyboard "Выберите max-delinquent-stake" "5" "10" "15" "20" "25"
+            fi
+            ;;
+    esac
+}
+
+declare -g current_log_level="ERR"
+handle_log() {
+    local command=$1
+
+    case "${CURRENT_STATE}" in
+        "${STATE_LOG}")
+            current_log_level=$command
+            generate_keyboard "Выберите количество логов" "1" "2" "5" "10" "20"
+            CURRENT_STATE=$STATE_LOG_2
+            ;;
+
+        "${STATE_LOG_2}")
+            count=$command
+            logs=$(${SUDO_CMD} journalctl -u ${SERVICE} --no-pager -n ${JOURNAL_COUNT} | grep " ${current_log_level} " | tail -n ${count})
+            if [[ -z "$logs" ]]; then
+                send_message "Логи не найдены"
+            else
+                send_message "Последние ${count} строк логов уровня ${current_log_level}:"
+                echo "$logs" | while IFS= read -r line; do send_message "$line"; done
+            fi
+            send_main_menu
+            ;;
+    esac
+}
+
+update_version() {
+    local current_version=$1
+    local max_delinquent=$2
+    PIPE=$(mktemp -u)
+    mkfifo "$PIPE"
+    ./update.sh "$current_version" "$max_delinquent" > "$PIPE" 2>&1 &
+        while IFS= read -r line; do send_message "$line"; done < "$PIPE"
+    rm "$PIPE"
+    send_main_menu
+}
+
+set_bot_commands
+
+last_update_id=0
+while true; do
+    updates=$(get_updates $last_update_id)
+
+    if [[ $(echo "$updates" | jq -r '.ok') == "false" ]]; then
+        sleep 1
+        continue
+    fi
+
+    results=$(echo "$updates" | jq -c '.result[]')
+
+    for update in $results; do
+        update_id=$(echo "$update" | jq -r '.update_id')
+
+        if [ -z "$update_id" ] || [ "$update_id" -le "$last_update_id" ]; then
+            continue
+        fi
+
+        last_update_id=$update_id
+        command=$(echo $update | jq -r '.message.text')
+        update $command
+    done
+
+    sleep 1
+done
