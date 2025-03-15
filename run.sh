@@ -58,7 +58,8 @@ set_bot_commands() {
             {"command": "catchup", "description": "Проверить синхронизацию"},
             {"command": "validators", "description": "Проверить валидаторов"},
             {"command": "get_log_bot", "description": "Получить логи бота"},
-            {"command": "log_service", "description": "Просмотр логов сервиса"}
+            {"command": "log_service", "description": "Просмотр логов сервиса"},
+            {"command": "reboot", "description": "!!! Перезагрузить ноду"}
         ]
     }')
 
@@ -76,6 +77,11 @@ send_main_menu() {
     message+="<b>/validators</b> - получить список валидаторов%0A%0A"
     message+="<b>/log_service</b> - просмотр логов сервиса%0A%0A"
     message+="<b>/get_log_bot</b> - скачать логи бота%0A%0A"
+
+    if [[ $CLIENT == $CLIENT_FIREDANCER ]]; then
+        message+="<b>/get_log_install</b> - скачать логи установки%0A%0A"
+    fi
+    message+="<b>/reboot</b> - !!! Перезагрузить ноду%0A%0A"
 
     res=$(curl -s -X POST "$TELEGRAM_URL" \
         -d chat_id="$CHAT_ID" \
@@ -145,13 +151,15 @@ get_versions() {
 STATE_MAIN_MENU="main_menu"
 
 STATE_SERVICE="service"
-STATE_SERVICE_2="service_2"
+STATE_SERVICE_UNSAFE="service_unsafe"
 
 STATE_UPDATE="update"
 STATE_UPDATE_2="update_2"
 
 STATE_LOG="log"
 STATE_LOG_2="log_2"
+
+STATE_REBOOT="reboot"
 
 CURRENT_STATE=$STATE_MAIN_MENU
 
@@ -170,7 +178,7 @@ update() {
 
         "/service")
             CURRENT_STATE=$STATE_SERVICE
-            generate_keyboard "Выберите действие" "start" "stop" "restart"
+            generate_keyboard "Выберите действие" "start" "stop" "restart" "version"
             ;;
 
         "/history_update")
@@ -179,6 +187,10 @@ update() {
 
         "/get_log_bot")
             send_file "$LOG_BOT_FILE"
+            ;;
+
+        "/get_log_install")
+            send_file "$INSTALL_LOG_FILE"
             ;;
 
         "/catchup")
@@ -194,6 +206,11 @@ update() {
             generate_keyboard "Выберите лог левел" "ERR" "WARNING" "INFO"
             ;;
 
+        "reboot")
+            CURRENT_STATE=$STATE_REBOOT
+            generate_keyboard "Вы уверены?" "Yes" "No"
+            ;;
+
         *)
             case "$CURRENT_STATE" in
                 "$STATE_UPDATE" | "$STATE_UPDATE_2")
@@ -204,9 +221,14 @@ update() {
                     handle_log "$command"
                     ;;
 
-                "$STATE_SERVICE" | "$STATE_SERVICE_2")
+                "$STATE_SERVICE" | "$STATE_SERVICE_UNSAFE")
                     handle_service "$command"
                     ;;
+
+                "$STATE_REBOOT")
+                    handle_reboot "$command"
+                    ;;
+
                 *)
                     send_message "Неизвестная команда: $command"
                     ;;
@@ -226,7 +248,7 @@ validators() {
 }
 
 catchup() {
-    output=$(${SUDO_CMD} solana catchup ${KEY_PAIR_PATH} http://127.0.0.1:8899/ 2>&1)
+    output=$(timeout -k 2 5 ${SUDO_CMD} solana catchup ${KEY_PAIR_PATH} http://127.0.0.1:8899/ 2>&1)
     if [[ $? -eq 0 ]]; then
         send_message "$output"
         if [[ $output =~ us:([0-9]+) ]]; then us_slot=${BASH_REMATCH[1]}; fi
@@ -243,12 +265,25 @@ handle_service() {
 
     case "${CURRENT_STATE}" in
         "$STATE_SERVICE")
-                CURRENT_STATE=$STATE_SERVICE_2
-                current_service_action=$command
-                generate_keyboard "Вы уверены?" "Yes" "No"
+            case "$command" in
+                start|stop|restart)
+                    CURRENT_STATE=$STATE_SERVICE_UNSAFE
+                    current_service_action=$command
+                    generate_keyboard "Вы уверены?" "Yes" "No"
+                    ;;
+                *)
+                    if [[ "$command" == "version" ]]; then
+                    version=$(curl -s http://127.0.0.1:8899 -X POST -H "Content-Type: application/json" \
+                                -d '{"jsonrpc":"2.0", "id":1, "method":"getVersion"}' | jq -r '.result."solana-core"')
+                        send_message "Текущая версия: $version"
+                    else
+                        send_main_menu
+                    fi
+                    ;;
+            esac
             ;;
 
-        "$STATE_SERVICE_2")
+        "$STATE_SERVICE_UNSAFE")
             if [[ "$command" == "Yes" ]]; then
                 ${SUDO_CMD} systemctl ${current_service_action} ${SERVICE}
                 send_main_menu
@@ -311,14 +346,28 @@ handle_log() {
     esac
 }
 
+handle_reboot() {
+    local command=$1
+
+    case "$command" in
+        "$STATE_REBOOT")
+            if [[ "$command" == "Yes" ]]; then
+                ${SUDO_CMD} reboot
+            fi
+            send_main_menu
+            ;;
+        *)
+            send_main_menu
+            ;;
+    esac
+}
+
 update_version() {
     local current_version=$1
     local max_delinquent=$2
-    PIPE=$(mktemp -u)
-    mkfifo "$PIPE"
-    ./update.sh "$current_version" "$max_delinquent" > "$PIPE" 2>&1 &
-        while IFS= read -r line; do send_message "$line"; done < "$PIPE"
-    rm "$PIPE"
+
+    TELEGRAM=1 ./update.sh "$current_version" "$max_delinquent"
+
     send_main_menu
 }
 

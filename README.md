@@ -17,4 +17,6 @@
 
 3. Создайте сессию в скрине screen -S solana_bot
 
-4. Запустите скрипт ./update_bot.sh и отключитесь от скрина ctrl + A + D
+4. Запустите скрипт ./run.sh и отключитесь от скрина ctrl + A + D
+
+5. Можно добавить в крон `crontab -e` -> `@reboot screen -dmS update_bot /path/run.sh`
