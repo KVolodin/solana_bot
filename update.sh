@@ -48,15 +48,18 @@ run_with_animation() {
 
     message_id=$(send_message_curl "$message" | jq '.result.message_id')
 
-    animate "$message" "$message_id" & 
+    animate "$message" "$message_id" &
     animation_pid=$!
 
     $command
+    local exit_code=$?
 
     kill $animation_pid
-
     delete_message $message_id
+
+    return $exit_code
 }
+
 
 output_message() {
     local message=$1
@@ -110,6 +113,7 @@ install_firedancer_deps() {
 
 make_firedancer(){
     make -j fdctl solana >> "$INSTALL_LOG_FILE" 2>&1
+    return $?
 }
 
 install_firedancer() {
@@ -118,10 +122,11 @@ install_firedancer() {
     local firedancer_bin="${INSTALL_FD_DIR}/build/native/gcc/bin/fdctl"
 
     if [[ -x "$firedancer_bin" ]]; then
-        current_version=$("$firedancer_bin" --version 2>/dev/null | awk '{print $1}')
+        current_version=$("$firedancer_bin" version 2>/dev/null | awk '{print $1}')
         clean_version=${VERSION#v}
 
         if [[ "$current_version" == "$clean_version" ]]; then
+            output_message "Версии совпадают, установка не требуется" | tee -a "$INSTALL_LOG_FILE"
             return 0
         fi
     fi
@@ -138,7 +143,20 @@ install_firedancer() {
 
     cd "$INSTALL_FD_DIR" || return 1
 
+    git submodule sync
     git submodule update --init --recursive >> "$INSTALL_LOG_FILE" 2>&1
+    if [[ $? -ne 0 ]]; then
+        output_message "Ошибка при обновлении подмодулей. Попробуем пересинхронизировать agave..." | tee -a "$INSTALL_LOG_FILE"
+
+        git submodule deinit -f agave >> "$INSTALL_LOG_FILE" 2>&1
+        rm -rf .git/modules/agave agave
+        git submodule update --init --recursive >> "$INSTALL_LOG_FILE" 2>&1
+
+        if [[ $? -ne 0 ]]; then
+            output_message "Ошибка: не удалось восстановить подмодуль agave." | tee -a "$INSTALL_LOG_FILE"
+            return 1
+        fi
+    fi
     git fetch origin >> "$INSTALL_LOG_FILE" 2>&1
     git checkout "$VERSION" >> "$INSTALL_LOG_FILE" 2>&1
     if [[ $? -ne 0 ]]; then
@@ -147,8 +165,8 @@ install_firedancer() {
     fi
 
     if [ "$TELEGRAM" == "1" ]; then
-        run_with_animation install_firedancer_deps "Установка зависимостей"
-        run_with_animation make_firedancer "Запуск сборки"
+        run_with_animation install_firedancer_deps "Установка зависимостей" || return 1
+        run_with_animation make_firedancer "Запуск сборки" || return 1
     else
         output_message "Установка зависимостей" | tee -a "$INSTALL_LOG_FILE"
         install_firedancer_deps
@@ -156,7 +174,7 @@ install_firedancer() {
         output_message "Запуск сборки" | tee -a "$INSTALL_LOG_FILE"
         make_firedancer
     fi
-    
+
     if [[ $? -ne 0 ]]; then
         output_message "Ошибка: сборка не удалась" | tee -a "$INSTALL_LOG_FILE"
         return 1
@@ -189,7 +207,10 @@ output_message "Начата установка ${CLIENT} версии: ${VERSIO
 START_TIME=$(date +%s)
 
 if [[ $CLIENT == $CLIENT_FIREDANCER ]]; then
-    install_firedancer
+    if ! install_firedancer; then
+        output_message "Ошибка: установка Firedancer не удалась."
+        exit 1
+    fi
 
 elif [[ $CLIENT == $CLIENT_AGAVE ]]; then
     install_agave

@@ -1,5 +1,6 @@
 #!/bin/bash
 
+cd "$(dirname "$0")"
 source ./config.sh
 
 log_error() {
@@ -350,10 +351,11 @@ handle_reboot() {
     local command=$1
 
     case "$command" in
-        "$STATE_REBOOT")
-            if [[ "$command" == "Yes" ]]; then
-                ${SUDO_CMD} reboot
-            fi
+        "Yes")
+            send_message "Перезагружаю систему..."
+            ${SUDO_CMD} reboot || send_message "Ошибка: не удалось перезагрузить систему"
+            ;;
+        "No")
             send_main_menu
             ;;
         *)
