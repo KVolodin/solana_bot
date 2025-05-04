@@ -24,7 +24,14 @@ fi
 
 send_message() {
     local message=$1
-    res=$(curl -s -X POST $TELEGRAM_URL -d chat_id=$CHAT_ID -d text="$message")
+    local remove_keyboard=${2:-false}
+
+    local payload="chat_id=$CHAT_ID&text=$message"
+    if [[ "$remove_keyboard" == "true" ]]; then
+        payload="$payload&reply_markup=$(jq -nc '{remove_keyboard: true}')"
+    fi
+
+    res=$(curl -s -X POST "$TELEGRAM_URL" -d "$payload")
 
     if [[ $(echo "$res" | jq -r '.ok') != "true" ]]; then
         log_error "Ошибка отправки сообщения: $message"
@@ -75,7 +82,7 @@ set_bot_commands() {
 send_main_menu() {
     local message+="<b>/update</b> - обновление ноды%0A%0A"
     message+="<b>/history_update</b> - скачать историю обновлений%0A%0A"
-    message+="<b>/service</b> - Рестарт/Старт/Стоп%0A%0A"
+    message+="<b>/service</b> - Рестарт/Старт/Стоп/Версия%0A%0A"
     message+="<b>/catchup</b> - проверка синхронизации%0A%0A"
     message+="<b>/validators</b> - получить список валидаторов%0A%0A"
     message+="<b>/log_service</b> - просмотр логов сервиса%0A%0A"
@@ -116,7 +123,7 @@ send_file() {
     local file_path="$1"
 
     if [[ ! -f "$file_path" ]]; then
-        send_message "Файл '$file_path' не найден!"
+        send_message "Файл '$file_path' не найден!" true
         return 1
     fi
 
@@ -244,21 +251,21 @@ update() {
 validators() {
     output=$(${SUDO_CMD} solana validators | awk '/Stake By Version:/,0' 2>&1)
     if [[ $? -eq 0 ]]; then
-        echo "$output" | while IFS= read -r line; do send_message "$line"; done
+        echo "$output" | while IFS= read -r line; do send_message "$line" true; done
     else
-        send_message "Ошибка: $output"
+        send_message "Ошибка: $output" true
     fi
 }
 
 catchup() {
-    output=$(timeout -k 2 5 ${SUDO_CMD} solana catchup ${KEY_PAIR_PATH} http://127.0.0.1:8899/ 2>&1)
+    output=$(timeout -k 2 10 ${SUDO_CMD} solana catchup ${KEY_PAIR_PATH} http://127.0.0.1:8899/ 2>&1)
     if [[ $? -eq 0 ]]; then
-        send_message "$output"
+        send_message "$output" true
         if [[ $output =~ us:([0-9]+) ]]; then us_slot=${BASH_REMATCH[1]}; fi
         if [[ $output =~ them:([0-9]+) ]]; then them_slot=${BASH_REMATCH[1]}; fi
-        send_message "Разница между слотами: $((us_slot - them_slot))"
+        send_message "Разница между слотами: $((us_slot - them_slot))" true
     else
-        send_message "Ошибка: $output"
+        send_message "Ошибка: $output" true
     fi
 }
 
@@ -276,9 +283,9 @@ handle_service() {
                     ;;
                 *)
                     if [[ "$command" == "version" ]]; then
-                    version=$(curl -s http://127.0.0.1:8899 -X POST -H "Content-Type: application/json" \
+                        version=$(curl -s http://127.0.0.1:8899 -X POST -H "Content-Type: application/json" \
                                 -d '{"jsonrpc":"2.0", "id":1, "method":"getVersion"}' | jq -r '.result."solana-core"')
-                        send_message "Текущая версия: $version"
+                        send_message "Текущая версия: $version" true
                     else
                         send_main_menu
                     fi
@@ -289,7 +296,6 @@ handle_service() {
         "$STATE_SERVICE_UNSAFE")
             if [[ "$command" == "Yes" ]]; then
                 ${SUDO_CMD} systemctl ${current_service_action} ${SERVICE}
-                send_main_menu
             else
                 send_main_menu
             fi
@@ -339,12 +345,11 @@ handle_log() {
             count=$command
             logs=$(${SUDO_CMD} journalctl -u ${SERVICE} --no-pager -n ${JOURNAL_COUNT} | grep " ${current_log_level} " | tail -n ${count})
             if [[ -z "$logs" ]]; then
-                send_message "Логи не найдены"
+                send_message "Логи не найдены" true
             else
-                send_message "Последние ${count} строк логов уровня ${current_log_level}:"
+                send_message "Последние ${count} строк логов уровня ${current_log_level}:" true
                 echo "$logs" | while IFS= read -r line; do send_message "$line"; done
             fi
-            send_main_menu
             ;;
     esac
 }
@@ -354,11 +359,10 @@ handle_reboot() {
 
     case "$command" in
         "Yes")
-            send_message "Перезагружаю систему..."
+            send_message "Перезагружаю систему..." true
             ${SUDO_CMD} reboot || send_message "Ошибка: не удалось перезагрузить систему"
             ;;
         "No")
-            send_main_menu
             ;;
         *)
             send_main_menu
@@ -372,7 +376,7 @@ update_version() {
 
     TELEGRAM=1 ./update.sh "$current_version" "$max_delinquent"
 
-    send_main_menu
+    send_message "Выберите одну из команд" true
 }
 
 set_bot_commands
