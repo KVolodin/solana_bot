@@ -182,7 +182,7 @@ install_firedancer() {
 
     cd -
 
-    FDCTL_VERSION=$("${firedancer_bin}" --version 2>/dev/null | awk '{print $1}')
+    FDCTL_VERSION=$("${firedancer_bin}" version 2>/dev/null | awk '{print $1}')
     CLEAN_VERSION=${VERSION#v}
 
     if [[ "$FDCTL_VERSION" != "$CLEAN_VERSION" ]]; then
