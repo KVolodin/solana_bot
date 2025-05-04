@@ -166,12 +166,12 @@ install_firedancer() {
 
     if [ "$TELEGRAM" == "1" ]; then
         run_with_animation install_firedancer_deps "Установка зависимостей" || return 1
-        run_with_animation make_firedancer "Запуск сборки" || return 1
+        run_with_animation make_firedancer "Идет сборка" || return 1
     else
         output_message "Установка зависимостей" | tee -a "$INSTALL_LOG_FILE"
         install_firedancer_deps
 
-        output_message "Запуск сборки" | tee -a "$INSTALL_LOG_FILE"
+        output_message "Идет сборка" | tee -a "$INSTALL_LOG_FILE"
         make_firedancer
     fi
 

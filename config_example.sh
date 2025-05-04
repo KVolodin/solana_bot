@@ -10,12 +10,18 @@ if [[ ! -d "$LOGS_DIR" ]]; then
     mkdir -p "$LOGS_DIR"
 fi
 
+STATE_DIR="$PWD/state"
+if [[ ! -d "$STATE_DIR" ]]; then
+    mkdir -p "$STATE_DIR"
+fi
+
 # --- Required Variables ---
 TELEGRAM_TOKEN=""       # Set your Telegram token here, ask from @BotFather
 CHAT_ID=""              # Set your Telegram chat ID here, ask from @userinfobot
 SERVICE="sol.service"
 LEDGER_FOLDER="/mnt/ledger/"
 USE_SUDO=true
+ID_FILE=${STATE_DIR}/last_update_id.txt
 
 # --- Logs ---
 INSTALL_LOG_FILE="${LOGS_DIR}/install.log"

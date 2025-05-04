@@ -68,6 +68,8 @@ set_bot_commands() {
         log_error "Ошибка создания меню"
         return 1
     fi
+
+    send_main_menu
 }
 
 send_main_menu() {
@@ -207,7 +209,7 @@ update() {
             generate_keyboard "Выберите лог левел" "ERR" "WARNING" "INFO"
             ;;
 
-        "reboot")
+        "/reboot")
             CURRENT_STATE=$STATE_REBOOT
             generate_keyboard "Вы уверены?" "Yes" "No"
             ;;
@@ -375,7 +377,12 @@ update_version() {
 
 set_bot_commands
 
-last_update_id=0
+if [[ -f "$ID_FILE" ]]; then
+    last_update_id=$(cat "$ID_FILE")
+else
+    last_update_id=0
+fi
+
 while true; do
     updates=$(get_updates $last_update_id)
 
@@ -394,6 +401,8 @@ while true; do
         fi
 
         last_update_id=$update_id
+        echo "$last_update_id" > "$ID_FILE"
+
         command=$(echo $update | jq -r '.message.text')
         update $command
     done
