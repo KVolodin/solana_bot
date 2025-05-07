@@ -19,4 +19,4 @@
 
 4. Запустите скрипт ./run.sh и отключитесь от скрина ctrl + A + D
 
-5. Можно добавить в крон `crontab -e` -> `@reboot screen -dmS update_bot /path/run.sh`
+5. Можно добавить в крон `crontab -e` -> `@reboot sleep 60 && screen -dmS update_bot /path/run.sh`
