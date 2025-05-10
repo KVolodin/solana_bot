@@ -15,23 +15,16 @@ log_info() {
     echo "$(date) - INFO: $1" >> "$LOG_BOT_FILE"
 }
 
-TELEGRAM_URL="https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage"
-
-SUDO_CMD=""
-if [ "${USE_SUDO}" = "true" ]; then
-    SUDO_CMD="sudo"
-fi
-
 send_message() {
     local message=$1
     local remove_keyboard=${2:-false}
 
-    local payload="chat_id=$CHAT_ID&text=$message"
+    local payload="chat_id=$BOT_ID&text=$message"
     if [[ "$remove_keyboard" == "true" ]]; then
         payload="$payload&reply_markup=$(jq -nc '{remove_keyboard: true}')"
     fi
 
-    res=$(curl -s -X POST "$TELEGRAM_URL" -d "$payload")
+    res=$(curl -s -X POST "$TELEGRAM_SEND_URL" -d "$payload")
 
     if [[ $(echo "$res" | jq -r '.ok') != "true" ]]; then
         log_error "Ошибка отправки сообщения: $message"
@@ -50,7 +43,7 @@ generate_keyboard() {
 
     keyboard="{\"keyboard\": [${buttons:2}], \"one_time_keyboard\": true}"
 
-    res=$(curl -s -X POST $TELEGRAM_URL -d chat_id=$CHAT_ID -d text="$action_text" -d reply_markup="$keyboard")
+    res=$(curl -s -X POST $TELEGRAM_SEND_URL -d chat_id=$BOT_ID -d text="$action_text" -d reply_markup="$keyboard")
 
     if [[ $(echo "$res" | jq -r '.ok') != "true" ]]; then
         log_error "Ошибка генерации клавиатуры: $keyboard"
@@ -64,6 +57,7 @@ set_bot_commands() {
             {"command": "history_update", "description": "Получить историю обновления"},
             {"command": "service", "description": "Сервис"},
             {"command": "catchup", "description": "Проверить синхронизацию"},
+            {"command": "monitor_agave", "description": "Проверить синхронизацию"},
             {"command": "validators", "description": "Проверить валидаторов"},
             {"command": "get_log_bot", "description": "Получить логи бота"},
             {"command": "log_service", "description": "Просмотр логов сервиса"},
@@ -84,6 +78,7 @@ send_main_menu() {
     message+="<b>/history_update</b> - скачать историю обновлений%0A%0A"
     message+="<b>/service</b> - Рестарт/Старт/Стоп/Версия%0A%0A"
     message+="<b>/catchup</b> - проверка синхронизации%0A%0A"
+    message+="<b>/monitor_agave</b> - проверка синхронизации%0A%0A"
     message+="<b>/validators</b> - получить список валидаторов%0A%0A"
     message+="<b>/log_service</b> - просмотр логов сервиса%0A%0A"
     message+="<b>/get_log_bot</b> - скачать логи бота%0A%0A"
@@ -93,8 +88,8 @@ send_main_menu() {
     fi
     message+="<b>/reboot</b> - !!! Перезагрузить ноду%0A%0A"
 
-    res=$(curl -s -X POST "$TELEGRAM_URL" \
-        -d chat_id="$CHAT_ID" \
+    res=$(curl -s -X POST "$TELEGRAM_SEND_URL" \
+        -d chat_id="$BOT_ID" \
         -d text="$message" \
         -d parse_mode="HTML")
 
@@ -103,8 +98,8 @@ send_main_menu() {
         return 1
     fi
 
-    res=$(curl -s -X POST "$TELEGRAM_URL" \
-        -d chat_id="$CHAT_ID" \
+    res=$(curl -s -X POST "$TELEGRAM_SEND_URL" \
+        -d chat_id="$BOT_ID" \
         -d text="Выберите одну из команд" \
         -d reply_markup='{"remove_keyboard": true}')
 
@@ -115,6 +110,11 @@ send_main_menu() {
 }
 
 send_version_menu() {
+    if [[ -z "$GITHUB_TOKEN" ]]; then
+        send_message "🔧 Укажите версию вручную без v, переменная GITHUB_TOKEN не задана."
+        return
+    fi
+
     mapfile -t versions < <(get_versions)
     generate_keyboard "Выберите версию для обновления:" "${versions[@]}"
 }
@@ -128,7 +128,7 @@ send_file() {
     fi
 
     res=$(curl -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument" \
-        -F "chat_id=${CHAT_ID}" \
+        -F "chat_id=${BOT_ID}" \
         -F "document=@${file_path}")
 
     if [[ $(echo "$res" | jq -r '.ok') != "true" ]]; then
@@ -205,6 +205,10 @@ update() {
 
         "/catchup")
             catchup
+            ;;
+
+        "/monitor_agave")
+            monitor_agave
             ;;
 
         "/validators")
@@ -370,46 +374,83 @@ handle_reboot() {
     esac
 }
 
+monitor_agave() {
+    output=$(${SUDO_CMD} timeout 1 agave-validator --ledger ${LEDGER_FOLDER} monitor 2>&1)
+    if ! echo "$output" | grep -q "Processed Slot"; then
+        send_message "⏳ Нода запускается: $output" true
+        return 0
+    fi
+    health=$(echo "$output" | grep -oP '\| \K([0-9]+ slots behind|unhealthy|ok)' | head -n1)
+
+    case "$health" in
+        unhealthy)
+            send_message "⚠️ Нода unhealthy" true
+            ;;
+        *"slots behind")
+            delay=$(echo "$health" | grep -oP '^\d+')
+            if [[ -n "$delay" ]]; then
+                send_message "⚠️ Нода отстаёт на $delay слотов" true
+            else
+                send_message "⚠️ Нода отстаёт, но не удалось определить на сколько" true
+            fi
+            ;;
+        ok|"")
+            trimmed=$(echo "$output" | grep "Processed Slot" | tail -n 1)
+            send_message "🟢 healthy: $trimmed" true
+            ;;
+        *)
+            send_message "⚠️ Неизвестный статус ноды: $health" true
+            ;;
+    esac
+}
+
+
 update_version() {
     local current_version=$1
     local max_delinquent=$2
 
-    TELEGRAM=1 ./update.sh "$current_version" "$max_delinquent"
-
-    send_message "Выберите одну из команд" true
+    TELEGRAM=1 ./private/update.sh "$current_version" "$max_delinquent"
 }
 
-set_bot_commands
-
-if [[ -f "$ID_FILE" ]]; then
-    last_update_id=$(cat "$ID_FILE")
-else
-    last_update_id=0
-fi
-
-while true; do
-    updates=$(get_updates $last_update_id)
-
-    if [[ $(echo "$updates" | jq -r '.ok') == "false" ]]; then
-        sleep 1
-        continue
+run_loop() {
+    if [[ -f "$ID_FILE" ]]; then
+        last_update_id=$(cat "$ID_FILE")
+    else
+        last_update_id=0
     fi
 
-    results=$(echo "$updates" | jq -c '.result[]')
+    while true; do
+        updates=$(get_updates $last_update_id)
 
-    for update in $results; do
-        update_id=$(echo "$update" | jq -r '.update_id')
-
-        if [ -z "$update_id" ] || [ "$update_id" -le "$last_update_id" ]; then
+        if [[ $(echo "$updates" | jq -r '.ok') == "false" ]]; then
+            sleep 1
             continue
         fi
 
-        last_update_id=$update_id
-        echo "$last_update_id" > "$ID_FILE"
+        results=$(echo "$updates" | jq -c '.result[]')
 
-        command=$(echo $update | jq -r '.message.text')
-        update $command
+        for update in $results; do
+            update_id=$(echo "$update" | jq -r '.update_id')
+
+            if [ -z "$update_id" ] || [ "$update_id" -le "$last_update_id" ]; then
+                continue
+            fi
+
+            last_update_id=$update_id
+            echo "$last_update_id" > "$ID_FILE"
+
+            command=$(echo $update | jq -r '.message.text')
+            update $command
+        done
+
+        sleep 1
     done
+}
 
-    sleep 1
-done
+main() {
+    set_bot_commands
+
+    run_loop
+}
+
+main "$@"

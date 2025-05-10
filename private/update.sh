@@ -1,28 +1,28 @@
 #!/bin/bash
-set -eo pipefail
 
 source ./config.sh
 
-TELEGRAM_EDIT_URL="https://api.telegram.org/bot$TELEGRAM_TOKEN/editMessageText"
-
 send_message_curl() {
     local message=$1
-    local url="https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage"
-    echo $(curl -s -X POST $url -d chat_id=$CHAT_ID -d text="$message")
+    local remove_keyboard=${2:-false}
+
+    local payload="chat_id=$BOT_ID&text=$message"
+    if [[ "$remove_keyboard" == "true" ]]; then
+        payload="$payload&reply_markup=$(jq -nc '{remove_keyboard: true}')"
+    fi
+
+    echo $(curl -s -X POST $TELEGRAM_SEND_URL -d "$payload")
 }
 
 edit_message_curl() {
     local message=$1
     local message_id=$2
-    local url="https://api.telegram.org/bot$TELEGRAM_TOKEN/editMessageText"
-    echo $(curl -s -X POST $url -d chat_id=$CHAT_ID -d "message_id=$message_id" -d text="$message")
+    echo $(curl -s -X POST $TELEGRAM_EDIT_URL -d chat_id=$BOT_ID -d "message_id=$message_id" -d text="$message")
 }
 
 delete_message() {
     local message_id=$1
-    local url="https://api.telegram.org/bot$TELEGRAM_TOKEN/deleteMessage"
-
-    response=$(curl -s -X POST $url -d chat_id=$CHAT_ID -d message_id=$message_id)
+    response=$(curl -s -X POST $TELEGRAM_DELETE_URL -d chat_id=$BOT_ID -d message_id=$message_id)
 
     if [[ $(echo "$response" | jq -r '.ok') != "true" ]]; then
         echo "Ошибка при удалении сообщения $message_id"
@@ -60,11 +60,11 @@ run_with_animation() {
     return $exit_code
 }
 
-
 output_message() {
     local message=$1
+    local remove_keyboard=${2:-false}
     if [ "$TELEGRAM" == "1" ]; then
-        response=$(send_message_curl "$message")
+        response=$(send_message_curl "$message" "$remove_keyboard")
         if [[ $(echo "$response" | jq -r '.ok') != "true" ]]; then
             echo "Ошибка отправки сообщения: $message"
             return 1
@@ -97,12 +97,8 @@ format_duration() {
 }
 
 wait_for_restart_and_restart() {
-    local sudo_cmd=""
-    if [ "${USE_SUDO}" = "true" ]; then
-        sudo_cmd="sudo"
-    fi
-    ${sudo_cmd} agave-validator --ledger ${LEDGER_FOLDER} wait-for-restart-window --max-delinquent-stake $MAX_DELINQUENT_STAKE > /dev/null 2>&1 && \
-    ${sudo_cmd} systemctl restart ${SERVICE}
+    ${SUDO_CMD} agave-validator --ledger ${LEDGER_FOLDER} wait-for-restart-window --max-delinquent-stake $MAX_DELINQUENT_STAKE > /dev/null 2>&1 && \
+    ${SUDO_CMD} systemctl restart ${SERVICE}
 }
 
 install_firedancer_deps() {
@@ -202,27 +198,78 @@ save_history() {
     echo "{\"date\": \"$(date)\", \"version\": \"${VERSION}\", \"client\": \"$CLIENT\", \"total_duration\": \"$(format_duration $TOTAL_DURATION)\", \"max-delinquent-stake\": \"$MAX_DELINQUENT_STAKE\"}" >> ${UPDATE_HISTORY_FILE}
 }
 
-output_message "Начата установка ${CLIENT} версии: ${VERSION}"
+check_agave_monitor_status() {
+    local attempt=0
+    local frames=("◢" "◣" "◤" "◥")
+    local frame_index=0
+    local initial_text="⏳ Проверка статуса ноды"
+    local message_id=$(send_message_curl "$initial_text" | jq '.result.message_id')
 
-START_TIME=$(date +%s)
+    while (( attempt < MAX_ATTEMPTS_CHECK_SYNC )); do
+        local frame=${frames[$frame_index]}
+        frame_index=$(( (frame_index + 1) % ${#frames[@]} ))
 
-if [[ $CLIENT == $CLIENT_FIREDANCER ]]; then
-    if ! install_firedancer; then
-        output_message "Ошибка: установка Firedancer не удалась."
-        exit 1
+        output=$(${SUDO_CMD} timeout 1 agave-validator --ledger "${LEDGER_FOLDER}" monitor 2>&1)
+        if ! echo "$output" | grep -q "Processed Slot"; then
+            edit_message_curl "⏳ Нода запускается: $output $frame" "$message_id"
+            continue
+        fi
+
+        health=$(echo "$output" | grep -oP '\| \K([0-9]+ slots behind|unhealthy|ok)' | head -n1)
+
+        case "$health" in
+            ok|"")
+                trimmed=$(echo "$output" | grep "Processed Slot" | tail -n 1)
+                edit_message_curl "🟢 healthy: $trimmed" "$message_id"
+                return 0
+                ;;
+            unhealthy)
+                edit_message_curl "⚠️ unhealthy $frame" "$message_id"
+                ;;
+            *"slots behind")
+                delay=$(echo "$health" | grep -oP '^\d+')
+                if [[ -n "$delay" ]]; then
+                    edit_message_curl "⚠️ Нода отстаёт на $delay слотов $frame" "$message_id"
+                else
+                    edit_message_curl "⚠️ Нода отстаёт (не удалось определить задержку) $frame" "$message_id"
+                fi
+                ;;
+            *)
+                edit_message_curl "${initial_text} $frame" "$message_id"
+                ;;
+        esac
+
+        ((attempt++))
+    done
+
+    edit_message_curl "❌ Нода не перешла в healthy за $MAX_ATTEMPTS_CHECK_SYNC попыток, возможно нужен ребут" "$message_id"
+    return 1
+}
+
+install_client() {
+    if [[ $CLIENT == $CLIENT_FIREDANCER ]]; then
+        if ! install_firedancer; then
+            output_message "Ошибка: установка Firedancer не удалась."
+            return 1
+        fi
+    elif [[ $CLIENT == $CLIENT_AGAVE ]]; then
+        install_agave
+    else
+        output_message "Задан неправльный клиент"
+        return 1
+    fi
+}
+
+main() {
+    output_message "Установка ${CLIENT} версии: ${VERSION}" true
+
+    local start_time=$(date +%s)
+
+    if ! install_client; then
+        return 1
     fi
 
-elif [[ $CLIENT == $CLIENT_AGAVE ]]; then
-    install_agave
-else
-    output_message "Задан неправльный клиент"
-    return 1
-fi
-
-if [ $? -eq 0 ]; then
-    INSTALL_TIME=$(date +%s)
-    INSTALL_DURATION=$((INSTALL_TIME - START_TIME))
-    output_message "Установка $CLIENT $VERSION завершена за $(format_duration $INSTALL_DURATION)."
+    output_message "Установка $CLIENT $VERSION завершена за $(format_duration $(( $(date +%s) - $start_time )))."
 
     if [ "$TELEGRAM" == "1" ]; then
         run_with_animation wait_for_restart_and_restart "Ожидание окна перезапуска валидатора($MAX_DELINQUENT_STAKE)"
@@ -232,15 +279,17 @@ if [ $? -eq 0 ]; then
     fi
 
     if [ $? -eq 0 ]; then
-        END_TIME=$(date +%s)
-        TOTAL_DURATION=$((END_TIME - START_TIME))
-        output_message "#update: $CLIENT обновлен до версии ${VERSION}, дата: $(date). общее время: $(format_duration $TOTAL_DURATION)."
+        output_message "#update: $CLIENT обновлен до версии ${VERSION}, дата: $(date). общее время: $(format_duration $(( $(date +%s) - $start_time )))."
         save_history
 
+        if [ "$TELEGRAM" == "1" ]; then
+            if check_agave_monitor_status; then
+                output_message "Время запуска: $(format_duration $(( $(date +%s) - $start_time )))."
+            fi
+        fi
     else
-        output_message "Ошибка перезапуска службы."
+        output_message "Ошибка перезапуска валидатора."
     fi
-else
-    output_message "Ошибка установки $CLIENT версии $VERSION."
-    exit 1
-fi
+}
+
+main "$@"

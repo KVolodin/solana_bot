@@ -1,36 +1,61 @@
-# --- Enum for Clients ---
+#######################################
+#           CLIENT ENUMS              #
+#######################################
+
 CLIENT_FIREDANCER="firedancer"
 CLIENT_AGAVE="agave"
+
+#######################################
+#      USER CONFIGURABLE SECTION      #
+#######################################
 
 # --- Select Client ---
 CLIENT=$CLIENT_FIREDANCER  # Change this to CLIENT_AGAVE if you want to use Agave client
 
-LOGS_DIR="$PWD/logs"
-if [[ ! -d "$LOGS_DIR" ]]; then
-    mkdir -p "$LOGS_DIR"
-fi
-
-STATE_DIR="$PWD/state"
-if [[ ! -d "$STATE_DIR" ]]; then
-    mkdir -p "$STATE_DIR"
-fi
-
 # --- Required Variables ---
 TELEGRAM_TOKEN=""       # Set your Telegram token here, ask from @BotFather
-CHAT_ID=""              # Set your Telegram chat ID here, ask from @userinfobot
+BOT_ID=""               # Set your Telegram bot ID here, ask from @userinfobot
 SERVICE="sol.service"
 LEDGER_FOLDER="/mnt/ledger/"
 USE_SUDO=true
-ID_FILE=${STATE_DIR}/last_update_id.txt
+
+# --- Optional Variables ---
+# --- Directories ---
+STATE_DIR="$PWD/state"
+LOGS_DIR="$PWD/logs"
 
 # --- Logs ---
 INSTALL_LOG_FILE="${LOGS_DIR}/install.log"
 LOG_BOT_FILE="${LOGS_DIR}/bot.log"
 UPDATE_HISTORY_FILE="${LOGS_DIR}/history.log"
 
-KEY_PAIR_PATH="$PWD/validator-keypair.json"
+# --- Other Variables ---
 GITHUB_TOKEN=""         # GitHub token for get versions
-
-# --- Optional Variables ---
+ID_FILE=${STATE_DIR}/last_update_id.txt
 JOURNAL_COUNT=100000
 INSTALL_FD_DIR="$PWD/firedancer"
+MAX_ATTEMPTS_CHECK_SYNC=240 # ~240 sec
+KEY_PAIR_PATH="$PWD/validator-keypair.json"
+
+#######################################
+#   INTERNAL (DO NOT MODIFY BELOW)    #
+#######################################
+
+# --- Create sudo command ---
+SUDO_CMD=""
+if [ "${USE_SUDO}" = "true" ]; then
+    SUDO_CMD="sudo"
+fi
+
+# --- Create folders ---
+if [[ ! -d "$LOGS_DIR" ]]; then
+    mkdir -p "$LOGS_DIR"
+fi
+if [[ ! -d "$STATE_DIR" ]]; then
+    mkdir -p "$STATE_DIR"
+fi
+
+# --- Urls ---
+TELEGRAM_SEND_URL="https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage"
+TELEGRAM_EDIT_URL="https://api.telegram.org/bot$TELEGRAM_TOKEN/editMessageText"
+TELEGRAM_DELETE_URL="https://api.telegram.org/bot$TELEGRAM_TOKEN/deleteMessage"
